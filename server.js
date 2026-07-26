@@ -1,21 +1,62 @@
 const crypto = require('crypto');
 const express = require('express');
 const PdfPrinter = require('pdfmake');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) { console.error('Нет BOT_TOKEN в переменных окружения'); process.exit(1); }
 
-// Roboto покрывает кириллицу; bolditalics ведём на Medium, чтобы не упасть
-const fonts = {
-  Roboto: {
-    normal:      require.resolve('pdfmake/fonts/Roboto-Regular.ttf'),
-    bold:        require.resolve('pdfmake/fonts/Roboto-Medium.ttf'),
-    italics:     require.resolve('pdfmake/fonts/Roboto-Regular.ttf'),
-    bolditalics: require.resolve('pdfmake/fonts/Roboto-Medium.ttf'),
+/* =========================================================
+   ШРИФТЫ. В pdfmake 0.2.x из пакета убрали папку fonts/ с ttf,
+   а серверный pdfmake требует настоящие файлы (vfs напрямую не
+   пробрасывается). Поэтому: достаём Roboto из build/vfs_fonts.js
+   (там он в base64) и раскладываем в /tmp как реальные .ttf.
+   ========================================================= */
+function extractVfs(obj) {
+  if (!obj) return null;
+  if (obj['Roboto-Regular.ttf']) return obj;
+  if (obj.vfs && obj.vfs['Roboto-Regular.ttf']) return obj.vfs;
+  if (obj.default && obj.default.vfs && obj.default.vfs['Roboto-Regular.ttf']) return obj.default.vfs;
+  return null;
+}
+function loadVfs() {
+  // 1) обычный require (поля exports в пакете нет — должно резолвиться)
+  try { const m = require('pdfmake/build/vfs_fonts'); const v = extractVfs(m); if (v) return v; } catch (e) {}
+  // 2) песочница по абсолютному пути — покрывает любую форму экспорта/UMD
+  try {
+    const file = path.join(__dirname, 'node_modules', 'pdfmake', 'build', 'vfs_fonts.js');
+    const code = fs.readFileSync(file, 'utf8');
+    const mod = { exports: {} };
+    const sandbox = {};
+    const fn = new Function('pdfMake', 'module', 'exports', code);
+    try { fn.call(sandbox, sandbox, mod, mod.exports); } catch (e) {}
+    const v = extractVfs(sandbox) || extractVfs(mod.exports) || extractVfs(mod);
+    if (v) return v;
+  } catch (e) {}
+  return null;
+}
+function buildFonts() {
+  const vfs = loadVfs();
+  if (!vfs) throw new Error('Не удалось извлечь шрифты из pdfmake/build/vfs_fonts.js');
+  const dir = path.join(os.tmpdir(), 'blvck-fonts');
+  fs.mkdirSync(dir, { recursive: true });
+  const want = { normal: 'Roboto-Regular.ttf', bold: 'Roboto-Medium.ttf', italics: 'Roboto-Italic.ttf', bolditalics: 'Roboto-MediumItalic.ttf' };
+  const Roboto = {};
+  for (const k in want) {
+    const b64 = vfs[want[k]] || vfs['Roboto-Regular.ttf']; // fallback на Regular, чтобы не крашнуться
+    const file = path.join(dir, want[k]);
+    fs.writeFileSync(file, Buffer.from(b64, 'base64'));
+    Roboto[k] = file;
   }
-};
+  return { Roboto };
+}
+const fonts = buildFonts();
 const printer = new PdfPrinter(fonts);
+console.log('Шрифты Roboto подготовлены:', Object.values(fonts.Roboto).map(p => path.basename(p)).join(', '));
 
+/* ---------- остальное без изменений ---------- */
 const app = express();
 app.use(express.json({ limit: '25mb' }));
 app.use((req, res, next) => {
@@ -25,7 +66,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// проверка подписи initData по документации Telegram
 function validateInitData(initData) {
   try {
     const params = new URLSearchParams(initData);
