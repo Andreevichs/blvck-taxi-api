@@ -3,5 +3,10 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "^4.19.2", "pdfmake": "^0.2.10" }
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pdfmake": "^0.2.10",
+    "pg": "^8.11.5"
+  }
 }
