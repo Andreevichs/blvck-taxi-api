@@ -1,0 +1,11 @@
+name: monthly auto-report
+on:
+  schedule:
+    - cron: '0 6 1 * *'      # 1-го числа каждого месяца, 06:00 UTC
+  workflow_dispatch:          # ручной запуск для проверки
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: trigger Render cron
+        run: curl -fsS "${{ secrets.RENDER_URL }}/cron/monthly?secret=${{ secrets.CRON_SECRET }}" || true
