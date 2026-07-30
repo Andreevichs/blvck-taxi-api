@@ -19,15 +19,31 @@ const CRON_SECRET = process.env.CRON_SECRET || '';
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!TOKEN) { console.error('Нет BOT_TOKEN'); process.exit(1); }
 
-/* ---- шрифты (pdfmake 0.2.x без папки fonts — берём из vfs) ---- */
+/* ---- шрифты: робастно достаём vfs из pdfmake (структура vfs_fonts.js
+   нестабильна между версиями — ловим все варианты обёртки) и передаём
+   в PdfPrinter декодированными Buffer. Это не зависит от версии pdfmake. ---- */
+function extractVfs(mod){
+  if(!mod) return null;
+  if(mod.vfs && typeof mod.vfs === 'object') return mod.vfs;
+  if(mod.pdfMake && mod.pdfMake.vfs && typeof mod.pdfMake.vfs === 'object') return mod.pdfMake.vfs;
+  if(mod.default){ const d = extractVfs(mod.default); if(d) return d; }
+  const keys = Object.keys(mod);
+  if(keys.some(k => /\.ttf$/i.test(k))) return mod; // плоский объект vfs
+  return null;
+}
 function loadFonts(){
-  const vfs = require('pdfmake/build/vfs_fonts.js');
-  const v = (vfs && vfs.vfs) || (vfs && vfs.default && vfs.default.vfs) || (global.pdfMake && global.pdfMake.vfs);
-  if(!v) throw new Error('vfs_fonts not found');
-  global.pdfMake = global.pdfMake || {}; global.pdfMake.vfs = v;
-  return { Roboto:{
-    normal:'Roboto-Regular.ttf', bold:'Roboto-Medium.ttf',
-    italics:'Roboto-Italic.ttf', bolditalics:'Roboto-MediumItalic.ttf'
+  const vfs = extractVfs(require('pdfmake/build/vfs_fonts.js'));
+  if(!vfs) throw new Error('vfs_fonts not found');
+  const b64 = name => {
+    const data = vfs[name];
+    if(!data) throw new Error('font missing in vfs: ' + name);
+    return Buffer.from(data, 'base64');
+  };
+  return { Roboto: {
+    normal: b64('Roboto-Regular.ttf'),
+    bold: b64('Roboto-Medium.ttf'),
+    italics: b64('Roboto-Italic.ttf'),
+    bolditalics: b64('Roboto-MediumItalic.ttf')
   }};
 }
 const printer = new PdfPrinter(loadFonts());
@@ -120,7 +136,6 @@ function buildDocDef(payload, monthFilter, demoStamp){
   const expRows = [['Дата','Категория','Заметка',{ text:'Сумма', alignment:'right' }]];
   exps.forEach(e=>expRows.push([e.date||'', e.t||e.category||'', (e.note||'').slice(0,36), { text:money(e.amount,cur), alignment:'right' }]));
   c.push({ table:{ widths:['16%','22%','*','22%'], body:expRows }, layout:'lightHorizontalLines', margin:[0,0,0,10] });
-  /* чеки-картинки */
   const withR = exps.filter(e=>e.receipt);
   if(withR.length){
     c.push({ text:'Чеки ('+withR.length+')', style:{ fontSize:11, bold:true, color:'#c2410c' }, margin:[0,0,0,4] });
@@ -142,8 +157,7 @@ function buildDocDef(payload, monthFilter, demoStamp){
     fines.forEach(f=>fr.push([f.name||'', f.paid?'оплачен':'не оплачен', { text:money(f.amount,cur), alignment:'right' }]));
     c.push({ table:{ widths:['*','30%','22%'], body:fr }, layout:'lightHorizontalLines' });
   }
-  return { pageSize:'A4', pageMargins:[36,36,36,36], content:c,
-    defaultStyle:{ fontSize:9, color:'#222' } };
+  return { pageSize:'A4', pageMargins:[36,36,36,36], content:c, defaultStyle:{ fontSize:9, color:'#222' } };
 }
 function buildPdf(docDef){
   return new Promise((res,rej)=>{ const doc=printer.createPdfKitDocument(docDef); const ch=[];
@@ -232,8 +246,6 @@ app.post('/pro/confirm', async (req,res)=>{
     if(!DATABASE_URL) return res.status(503).send('no db');
     const user = await authUser(req); if(!user) return res.status(401).send('bad initData');
     const plan = req.body.plan; const p = PLANS[plan]; if(!p) return res.status(400).send('bad plan');
-    /* активация по факту paid-callback: звёзды списал сам Telegram при openInvoice.
-       best-effort проверка транзакции опущена ради надёжности; лог для учёта. */
     console.log('PRO CONFIRM', { chat_id:user.id, plan, at:new Date().toISOString() });
     await withDb(c=>c.query(
       `UPDATE users SET pro_plan=$2,
