@@ -2,12 +2,11 @@
    server.js — BLVCK TAXI API
    /sync            — облачный бэкап данных пользователя
    /send-report     — разовый PDF в чат по кнопке
-   /pro/status      — статус подписки / триала (ставит триал при 1-м вызове)
+   /pro/status      — статус подписки / триала (OWNER_ID = вечный PRO)
    /pro/create-invoice — Stars-invoice (XTR) для тарифа
    /pro/confirm     — активация PRO по факту paid (звёзды списал Telegram)
    /pro/trial-demo  — один демо-PDF в чат на триале
-   /cron/monthly    — авто-отчёты подписчикам за прошлый месяц
-   Проверка initData по HMAC (WebAppData). PDF — pdfmake (кириллица).
+   /cron/monthly    — авто-отчёты подписчикам (+ владелец по OWNER_ID)
    ========================================================= */
 const crypto = require('crypto');
 const express = require('express');
@@ -17,18 +16,18 @@ const { Client } = require('pg');
 const TOKEN = process.env.BOT_TOKEN;
 const CRON_SECRET = process.env.CRON_SECRET || '';
 const DATABASE_URL = process.env.DATABASE_URL;
+const OWNER_ID = process.env.OWNER_ID ? String(process.env.OWNER_ID).trim() : '';
 if (!TOKEN) { console.error('Нет BOT_TOKEN'); process.exit(1); }
+if (OWNER_ID) console.log('OWNER_ID set -> вечный PRO для chat_id ' + OWNER_ID);
 
-/* ---- шрифты: робастно достаём vfs из pdfmake (структура vfs_fonts.js
-   нестабильна между версиями — ловим все варианты обёртки) и передаём
-   в PdfPrinter декодированными Buffer. Это не зависит от версии pdfmake. ---- */
+/* ---- шрифты: робастно достаём vfs из pdfmake ---- */
 function extractVfs(mod){
   if(!mod) return null;
   if(mod.vfs && typeof mod.vfs === 'object') return mod.vfs;
   if(mod.pdfMake && mod.pdfMake.vfs && typeof mod.pdfMake.vfs === 'object') return mod.pdfMake.vfs;
   if(mod.default){ const d = extractVfs(mod.default); if(d) return d; }
   const keys = Object.keys(mod);
-  if(keys.some(k => /\.ttf$/i.test(k))) return mod; // плоский объект vfs
+  if(keys.some(k => /\.ttf$/i.test(k))) return mod;
   return null;
 }
 function loadFonts(){
@@ -208,6 +207,22 @@ app.post('/pro/status', async (req,res)=>{
   try{
     if(!DATABASE_URL) return res.status(503).send('no db');
     const user = await authUser(req); if(!user) return res.status(401).send('bad initData');
+
+    /* ---- ВЛАДЕЛЕЦ: вечный PRO без оплаты. id берётся из env OWNER_ID,
+       в клиенте бэкдора нет — вся логика только здесь, на сервере. ---- */
+    if(OWNER_ID && String(user.id) === OWNER_ID){
+      const far = new Date(Date.now() + 100*365*24*3600*1000);
+      try{
+        await withDb(c=>c.query(
+          `INSERT INTO users(chat_id,data,pro_until,pro_plan,trial_started)
+             VALUES($1,'{}'::jsonb,$2,'owner',now())
+             ON CONFLICT(chat_id) DO UPDATE SET pro_until=EXCLUDED.pro_until, pro_plan='owner'`,
+          [user.id, far]));
+      }catch(e){ console.error('owner upsert', e.message); }
+      return res.json({ active:true, until:far.toISOString(), plan:'owner',
+                        trial_active:false, trial_days_left:0, trial_demo_sent:false });
+    }
+
     const row = await withDb(c=>c.query('SELECT pro_until, pro_plan, trial_started, trial_demo_sent FROM users WHERE chat_id=$1', [user.id]));
     let pro_until=null, pro_plan=null, trial_started=null, trial_demo_sent=false;
     if(row.rows.length){ ({ pro_until, pro_plan, trial_started, trial_demo_sent } = row.rows[0]); }
@@ -281,7 +296,10 @@ app.get('/cron/monthly', async (req,res)=>{
   if(!DATABASE_URL) return res.status(503).send('no db');
   const mf = monthBounds(-1);
   try{
-    const rows = await withDb(c=>c.query('SELECT chat_id, data FROM users WHERE pro_until > now()'));
+    /* владелец попадает в рассылку по OWNER_ID даже если ещё не открывал приложение */
+    const rows = OWNER_ID
+      ? await withDb(c=>c.query('SELECT chat_id, data FROM users WHERE pro_until > now() OR chat_id = $1', [OWNER_ID]))
+      : await withDb(c=>c.query('SELECT chat_id, data FROM users WHERE pro_until > now()'));
     let sent=0, failed=0;
     for(const r of rows.rows){
       try{
